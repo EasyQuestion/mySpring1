@@ -1,9 +1,6 @@
 package com.mmh;
 
-import com.mmh.annotation.Autowired;
-import com.mmh.annotation.Controller;
-import com.mmh.annotation.RequestMapping;
-import com.mmh.annotation.Service;
+import com.mmh.annotation.*;
 
 import javax.servlet.ServletConfig;
 import javax.servlet.ServletException;
@@ -38,16 +35,44 @@ public class MyServlet extends HttpServlet {
 
     @Override
     protected void doPost(HttpServletRequest req, HttpServletResponse resp) throws ServletException, IOException {
-        doDispatch(req,resp);
+        try {
+            doDispatch(req, resp);
+        }catch (Exception e){
+            e.printStackTrace();
+            resp.getWriter().write("500 Exception,Detail:"+Arrays.toString(e.getStackTrace()));
+        }
     }
 
-    private void doDispatch(HttpServletRequest req, HttpServletResponse resp) {
-        String uri = req.getRequestURI().replace(req.getContextPath(),"");
+    private void doDispatch(HttpServletRequest req, HttpServletResponse resp) throws Exception{
+        String uri = req.getRequestURI().replace(req.getContextPath(),"").replaceAll("/+","/");
+        if(!handlerMapping.containsKey(uri)){
+            resp.getWriter().write("404 Not found!!!");
+            return;
+        }
         Method method = handlerMapping.get(uri);
-        if(method == null){return;}
         Object obj = iocMap.get(getLowerFirstCase(method.getDeclaringClass().getSimpleName()));
+        Map<String,String[]> reqParamMap = req.getParameterMap();
+        Class[] paramTypes = method.getParameterTypes();
+        Object[] paramValues = new Object[paramTypes.length];
+
+        for(int i=0;i<paramTypes.length;i++){
+            Class paramType = paramTypes[i];
+            if(paramType == HttpServletRequest.class){
+                paramValues[i] = req;
+            }else if(paramType == HttpServletResponse.class){
+                paramValues[i] = resp;
+            }else{
+               Annotation[] annotations = method.getParameterAnnotations()[i];
+               for(Annotation a:annotations){
+                   if(a.annotationType() != RequestParam.class){continue;}
+                   String paramName = ((RequestParam) a).value();
+                   paramValues[i] = Arrays.toString(reqParamMap.get(paramName))
+                           .replaceAll("\\[|\\]","");
+               }
+            }
+        }
         try {
-            method.invoke(obj,new Object[]{req,resp,req.getParameter("name")});
+            method.invoke(obj,paramValues);
         } catch (IllegalAccessException e) {
             e.printStackTrace();
         } catch (InvocationTargetException e) {
@@ -72,25 +97,28 @@ public class MyServlet extends HttpServlet {
     }
 
     private void doHandlerMapping() {
-        if(classNames.isEmpty()){return;}
+        if(iocMap.isEmpty()){return;}
 
         try {
-            for (String className : classNames) {
+            for (Map.Entry<String,Object> entry : iocMap.entrySet()) {
                 //获取方法上的路径
-                Class clazz = Class.forName(className);
-                if(!clazz.isAnnotationPresent(RequestMapping.class)){continue;}
+                Class clazz = entry.getValue().getClass();
+                if(!clazz.isAnnotationPresent(Controller.class)){continue;}
 
-                RequestMapping requestMapping = (RequestMapping)clazz.getAnnotation(RequestMapping.class);
-                String bashUrl = "/"+requestMapping.value();
+                String baseUrl = "";
+                if(clazz.isAnnotationPresent(RequestMapping.class)){
+                    RequestMapping requestMapping = (RequestMapping)clazz.getAnnotation(RequestMapping.class);
+                    baseUrl = "/"+requestMapping.value();
+                }
 
-                //获取所有的方法
+                //获取所有的public方法
                 Method[] methods = clazz.getMethods();
 
                 for(Method m:methods){
                     if(!m.isAnnotationPresent(RequestMapping.class)){continue;}
 
-                    requestMapping = m.getAnnotation(RequestMapping.class);
-                    String url = (bashUrl +"/"+requestMapping.value()).replaceAll("/+","/");
+                    RequestMapping requestMapping = m.getAnnotation(RequestMapping.class);
+                    String url = (baseUrl +"/"+requestMapping.value()).replaceAll("/+","/");
                     //将路径与方法对应，放入到handlerMapping中
                     handlerMapping.put(url,m);
                     System.out.println("mapping  "+url+":"+m);
@@ -158,6 +186,9 @@ public class MyServlet extends HttpServlet {
                     //获取接口
                     Class[] interfaces = clazz.getInterfaces();
                     for(Class interfaceClass:interfaces){
+                        if(iocMap.containsKey(interfaceClass.getName())){
+                            throw new Exception("the '"+interfaceClass.getName()+"' is exists!");
+                        }
                         //将接口与对应的实现类对应，放入ioc容器中
                         iocMap.put(interfaceClass.getName(),obj);
                     }
@@ -184,7 +215,8 @@ public class MyServlet extends HttpServlet {
             if(f.isDirectory()){
                 doScanner(classPath+"."+f.getName());
             }else{
-                String className = classPath+"."+(f.getName().replace(".class",""));
+                if(!f.getName().endsWith(".class")) {continue;}
+                String className = classPath + "." + (f.getName().replace(".class", ""));
                 classNames.add(className);
             }
         }
